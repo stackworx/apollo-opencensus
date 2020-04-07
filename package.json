@@ -1,62 +1,61 @@
 {
-  "name": "apollo-opentracing",
+  "name": "apollo-opencensus",
   "version": "0.0.0-development",
-  "description": "Trace your GraphQL server with Opentracing",
+  "description": "Trace your GraphQL server with Opencensus",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
+    "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "compile": "tsc",
-    "prepare": "npm run clean && npm run compile",
+    "build": "yarn build:types && yarn build:js",
+    "build:types": "tsc --project tsconfig.build.json --emitDeclarationOnly",
+    "build:js": "babel src --out-dir dist --extensions \".ts\" --source-maps inline --ignore '**/__tests__/**,**/test/**'",
+    "prepublishOnly": "yarn clean && yarn build",
     "test": "jest",
+    "test:debug": "ndb ./node_modules/.bin/jest",
     "semantic-release": "semantic-release",
-    "travis-deploy-once": "travis-deploy-once --pro",
     "contributors:add": "all-contributors add",
     "contributors:generate": "all-contributors generate"
   },
   "jest": {
-    "transform": {
-      "^.+\\.tsx?$": "ts-jest"
-    },
-    "testRegex": "(/__tests__/.*|(\\.|/)(test|spec))\\.(jsx?|tsx?)$",
-    "moduleFileExtensions": [
-      "ts",
-      "tsx",
-      "js",
-      "jsx",
-      "json",
-      "node"
-    ]
+    "testEnvironment": "node"
   },
-  "repository": "DanielMSchmidt/apollo-opentracing",
-  "author": "Daniel Schmidt <danielmschmidt92@gmail.com>",
+  "repository": "stackworx/apollo-opencensus",
+  "author": "Ciaran Liedeman <ciaran@stackworx.io>",
   "license": "MIT",
   "peerDependencies": {
+    "@opencensus/core": "*",
+    "apollo-server": "^2.4.8",
     "apollo-server-env": "*",
-    "graphql": "0.10.x - 14.4.x",
-    "opentracing": "*",
-    "apollo-server": "^2.4.8"
+    "graphql": "0.10.x - 14.4.x"
   },
   "dependencies": {
-    "apollo-server-types": "^0.2.1",
+    "apollo-server-types": "^0.3.0",
     "graphql-extensions": "^0.7.0"
   },
   "devDependencies": {
-    "@types/graphql": "14.2.2",
-    "@types/jest": "23.3.14",
-    "@types/node": "11.15.9",
-    "all-contributors-cli": "6.13.0",
-    "apollo-server": "2.6.8",
-    "apollo-server-env": "2.4.0",
+    "@babel/cli": "^7.8.4",
+    "@babel/core": "^7.9.0",
+    "@babel/preset-env": "^7.9.0",
+    "@babel/preset-typescript": "^7.9.0",
+    "@opencensus/core": "^0.0.21",
+    "@opencensus/exporter-jaeger": "^0.0.21",
+    "@opencensus/nodejs-base": "^0.0.21",
+    "@opencensus/propagation-tracecontext": "^0.0.21",
+    "@types/continuation-local-storage": "^3.2.2",
+    "@types/jest": "^25.2.1",
+    "@types/node": "12.12.6",
+    "all-contributors-cli": "6.14.1",
+    "apollo-server": "2.11.0",
+    "apollo-server-env": "2.4.3",
     "express": "4.17.1",
-    "graphql": "14.4.2",
-    "graphql-tools": "4.0.5",
-    "jest": "23.6.0",
-    "opentracing": "0.14.3",
+    "graphql": "14.5.8",
+    "graphql-tools": "4.0.7",
+    "jest": "25.2.7",
+    "postinstall-postinstall": "^2.1.0",
+    "prettier": "^2.0.4",
     "semantic-release": "15.13.18",
     "supertest": "4.0.2",
-    "travis-deploy-once": "5.0.11",
-    "ts-jest": "23.1.4",
-    "typescript": "3.5.3"
+    "typescript": "3.8.3"
   }
 }

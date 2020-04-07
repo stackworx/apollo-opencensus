@@ -1,120 +1,120 @@
-import * as express from "express";
-import * as request from "supertest";
+import express from "express";
+import request from "supertest";
+import { Exporter, Span, LinkType } from "@opencensus/core";
+import { TracingBase } from "@opencensus/nodejs-base";
+import { TraceContextFormat } from "@opencensus/propagation-tracecontext";
+import { JaegerTraceExporter } from "@opencensus/exporter-jaeger";
 import { ApolloServer } from "apollo-server-express";
-import ApolloOpentracing from "../";
-import spanSerializer from "../test/span-serializer";
-import { MockSpan, MockSpanTree } from "../test/types";
+
+import ApolloOpencensus from "../";
+import spanSerializer, { SpanTree } from "../test/span-serializer";
+
+const { JAEGER_EXPORTER = false } = process.env;
+
+const traceContext = new TraceContextFormat();
 
 expect.addSnapshotSerializer(spanSerializer);
 
-let mockSpanId = 1;
+class TestExporter implements Exporter {
+  public spans: Span[] = [];
+  public spansById: Map<string, Span> = new Map();
 
-// Stable spanId's
-beforeEach(() => {
-  mockSpanId = 1;
-});
+  async publish(_spans: Span[]): Promise<void> {}
 
-const buildSpanTree = (spans: MockSpan[]) => {
-  // TODO we currently assume there is only one null parent entry.
-  // The root span
+  onStartSpan(span: Span): void {
+    this.spans.push(span);
+    this.spansById.set(span.id, span);
+  }
+  onEndSpan(_span: Span): void {}
 
-  let rootSpan = null;
+  buildSpanTree() {
+    const spans = this.spans;
+    // TODO we currently assume there is only one null parent entry.
+    // The root span
 
-  const spansByParentId = spans.reduce((acc, span) => {
-    // Check for root
-    if (span.parentId) {
-      if (acc.has(span.parentId)) {
-        acc.get(span.parentId).push(span);
+    let rootSpan = null;
+
+    const spansByParentId = spans.reduce((acc, span) => {
+      // Check for root
+      if (span.links.length > 0) {
+        const parentLink = span.links.find(
+          // (link) => link.type == LinkType.PARENT_LINKED_SPAN
+          (link) => link.type == LinkType.CHILD_LINKED_SPAN
+        );
+
+        if (parentLink) {
+          const parentSpanId = parentLink.spanId;
+
+          if (acc.has(parentSpanId)) {
+            acc.get(parentSpanId).push(span);
+          } else {
+            acc.set(parentSpanId, [span]);
+          }
+        }
       } else {
-        acc.set(span.parentId, [span]);
+        rootSpan = span;
       }
-    } else {
-      rootSpan = span;
-    }
 
-    return acc;
-  }, new Map<number, MockSpan[]>());
+      return acc;
+    }, new Map<string, Span[]>());
 
-  expect(rootSpan).toBeDefined();
+    expect(rootSpan).toBeDefined();
 
-  const tree = {
-    ...rootSpan,
-    children: []
-  };
+    const tree = {
+      parent: rootSpan,
+      children: [],
+    };
 
-  buildTree(tree, spansByParentId);
+    buildTree(tree, spansByParentId);
 
-  // Lost Spans
-  expect(spansByParentId.size).toBe(0);
+    return tree;
+  }
+}
 
-  return tree;
-};
+const buildTree = (tree: SpanTree, spansByParentId: Map<string, Span[]>) => {
+  const { parent } = tree;
 
-const buildTree = (
-  parent: MockSpanTree,
-  spansByParentId: Map<number, MockSpan[]>
-) => {
   if (spansByParentId.has(parent.id)) {
     const spans = spansByParentId.get(parent.id);
     spansByParentId.delete(parent.id);
 
     // TODO: do we need to sort?
     for (const span of spans) {
-      const node = {
-        ...span,
-        children: []
+      const subTree = {
+        parent: span,
+        children: [],
       };
 
-      parent.children.push(node);
-      buildTree(node, spansByParentId);
+      tree.children.push(subTree);
+      buildTree(subTree, spansByParentId);
     }
   }
 };
 
-class MockTracer {
-  spans: MockSpan[];
-  constructor() {
-    this.spans = [];
+function createTracer(): {
+  tracer: TracingBase;
+  exporter: TestExporter;
+} {
+  const exporter = new TestExporter();
+  const base = new TracingBase();
+  base.registerExporter(exporter);
+  // Sample all requests
+  const tracer = base.start({ propagation: traceContext, samplingRate: 1 });
+
+  if (JAEGER_EXPORTER) {
+    base.registerExporter(
+      new JaegerTraceExporter({
+        serviceName: "apollo-opentracing",
+        tags: [], // optional
+        host: "localhost", // optional
+        port: 6832, // optional
+        maxPacketSize: 65000, // optional
+      })
+    );
   }
 
-  extract() {
-    // TODO: make extraced spans testable
-    return null;
-  }
-
-  startSpan(name, options) {
-    const spanId = mockSpanId++;
-
-    this.spans.push({
-      id: spanId,
-      parentId: options && options.childOf && options.childOf.id,
-      name,
-      options,
-      logs: [],
-      tags: [],
-      finished: false
-    });
-
-    const self = this;
-
-    return {
-      log(object) {
-        self.spans.find(span => span.id === spanId).logs.push(object);
-      },
-
-      setTag(key, value) {
-        self.spans.find(span => span.id === spanId).tags.push({"key": key, "value": value})
-      },
-
-      id: spanId,
-      // Added for debugging
-      name: name,
-
-      finish() {
-        self.spans.find(span => span.id === spanId).finished = true;
-      }
-    };
-  }
+  // @ts-ignore
+  return { tracer: tracer.tracer, exporter };
 }
 
 function createApp({ tracer, ...params }) {
@@ -145,12 +145,12 @@ function createApp({ tracer, ...params }) {
           return {
             one: "1",
             two: "2",
-            three: [{ four: "4" }, { four: "IV" }]
+            three: [{ four: "4" }, { four: "IV" }],
           };
         },
         b() {
           return {
-            four: "4"
+            four: "4",
           };
         },
 
@@ -158,23 +158,21 @@ function createApp({ tracer, ...params }) {
           return [
             {
               one: "1",
-              two: "2"
+              two: "2",
             },
             {
               one: "I",
-              two: "II"
+              two: "II",
             },
             {
               one: "eins",
-              two: "zwei"
-            }
+              two: "zwei",
+            },
           ];
-        }
-      }
+        },
+      },
     },
-    extensions: [
-      () => new ApolloOpentracing({ ...params, server: tracer, local: tracer })
-    ]
+    extensions: [() => new ApolloOpencensus({ ...params, tracer })],
   });
 
   server.applyMiddleware({ app });
@@ -183,8 +181,9 @@ function createApp({ tracer, ...params }) {
 }
 
 describe("integration with apollo-server", () => {
-  it("closes all spans", async () => {
-    const tracer = new MockTracer();
+  it.only("closes all spans", async () => {
+    // const tracer = new MockTracer();
+    const { tracer, exporter } = createTracer();
     const app = createApp({ tracer });
     await request(app)
       .post("/graphql")
@@ -194,16 +193,18 @@ describe("integration with apollo-server", () => {
         a {
           one
         }
-      }`
+      }`,
       })
       .expect(200);
 
-    expect(tracer.spans.length).toBe(3);
-    expect(tracer.spans.filter(span => span.finished).length).toBe(3);
+    expect(exporter.spans.length).toBe(3);
+    expect(exporter.spans.filter((span) => span.ended).length).toBe(3);
+    tracer.stop();
   });
 
   it("correct span nesting", async () => {
-    const tracer = new MockTracer();
+    // const tracer = new MockTracer();
+    const { tracer, exporter } = createTracer();
     const app = createApp({ tracer });
     await request(app)
       .post("/graphql")
@@ -214,16 +215,18 @@ describe("integration with apollo-server", () => {
           one
           two
         }
-      }`
+      }`,
       })
       .expect(200);
 
-    const tree = buildSpanTree(tracer.spans);
+    const tree = exporter.buildSpanTree();
     expect(tree).toMatchSnapshot();
+    tracer.stop();
   });
 
   it("does not start a field resolver span if the parent field resolver was not traced", async () => {
-    const tracer = new MockTracer();
+    // const tracer = new MockTracer();
+    const { tracer, exporter } = createTracer();
     const shouldTraceFieldResolver = (source, args, ctx, info) => {
       if (info.fieldName === "a") {
         return false;
@@ -244,16 +247,17 @@ describe("integration with apollo-server", () => {
         b {
           four
         }
-      }`
+      }`,
       })
       .expect(200);
 
-    const tree = buildSpanTree(tracer.spans);
+    const tree = exporter.buildSpanTree();
     expect(tree).toMatchSnapshot();
   });
 
   it("implements traces for arrays", async () => {
-    const tracer = new MockTracer();
+    // const tracer = new MockTracer();
+    const { tracer, exporter } = createTracer();
     const app = createApp({ tracer });
     await request(app)
       .post("/graphql")
@@ -264,16 +268,17 @@ describe("integration with apollo-server", () => {
           one
           two
         }
-      }`
+      }`,
       })
       .expect(200);
 
-    const tree = buildSpanTree(tracer.spans);
+    const tree = exporter.buildSpanTree();
     expect(tree).toMatchSnapshot();
   });
 
   it("alias works", async () => {
-    const tracer = new MockTracer();
+    // const tracer = new MockTracer();
+    const { tracer, exporter } = createTracer();
     const app = createApp({ tracer });
     await request(app)
       .post("/graphql")
@@ -284,16 +289,17 @@ describe("integration with apollo-server", () => {
           uno: one
           two
         }
-      }`
+      }`,
       })
       .expect(200);
 
-    const tree = buildSpanTree(tracer.spans);
+    const tree = exporter.buildSpanTree();
     expect(tree).toMatchSnapshot();
   });
 
   it("alias with fragment works", async () => {
-    const tracer = new MockTracer();
+    // const tracer = new MockTracer();
+    const { tracer, exporter } = createTracer();
     const app = createApp({ tracer });
     await request(app)
       .post("/graphql")
@@ -308,11 +314,11 @@ describe("integration with apollo-server", () => {
         a {
           ...F
         }
-      }`
+      }`,
       })
       .expect(200);
 
-    const tree = buildSpanTree(tracer.spans);
+    const tree = exporter.buildSpanTree();
     expect(tree).toMatchSnapshot();
   });
 });

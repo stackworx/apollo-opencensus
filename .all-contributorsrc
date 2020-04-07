@@ -1,6 +1,6 @@
 {
-  "projectName": "apollo-opentracing",
-  "projectOwner": "DanielMSchmidt",
+  "projectName": "apollo-opencensus",
+  "projectOwner": "stackworx",
   "repoType": "github",
   "repoHost": "https://github.com",
   "files": [

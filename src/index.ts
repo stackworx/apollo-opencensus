@@ -2,7 +2,15 @@ import { Request } from "apollo-server-env";
 import { GraphQLRequestContext } from "apollo-server-types";
 import { DocumentNode, GraphQLResolveInfo } from "graphql";
 import { GraphQLExtension } from "graphql-extensions";
-import { FORMAT_HTTP_HEADERS, Span, Tracer } from "opentracing";
+
+import {
+  Span,
+  Tracer,
+  HeaderGetter,
+  TraceOptions,
+  SpanKind,
+  LinkType,
+} from "@opencensus/core";
 import { addContextHelpers, SpanContext } from "./context";
 
 export { SpanContext, addContextHelpers };
@@ -11,8 +19,7 @@ const alwaysTrue = () => true;
 const emptyFunction = () => {};
 
 export interface InitOptions<TContext> {
-  server?: Tracer;
-  local?: Tracer;
+  tracer?: Tracer;
   onFieldResolveFinish?: (error: Error | null, result: any, span: Span) => void;
   onFieldResolve?: (
     source: any,
@@ -57,10 +64,9 @@ function getFieldName(info: GraphQLResolveInfo) {
   return info.fieldName || "field";
 }
 
-export default class OpentracingExtension<TContext extends SpanContext>
+export default class OpencensusExtension<TContext extends SpanContext>
   implements GraphQLExtension<TContext> {
-  private serverTracer: Tracer;
-  private localTracer: Tracer;
+  private tracer: Tracer;
   private requestSpan: Span | null;
   private onFieldResolveFinish?: (
     error: Error | null,
@@ -83,28 +89,20 @@ export default class OpentracingExtension<TContext extends SpanContext>
   private onRequestResolve: (span: Span, info: RequestStart<TContext>) => void;
 
   constructor({
-    server,
-    local,
+    tracer,
     shouldTraceRequest,
     shouldTraceFieldResolver,
     onFieldResolveFinish,
     onFieldResolve,
-    onRequestResolve
+    onRequestResolve,
   }: InitOptions<TContext> = {}) {
-    if (!server) {
+    if (!tracer) {
       throw new Error(
-        "ApolloOpentracing needs a server tracer, please provide it to the constructor. e.g. new ApolloOpentracing({ server: serverTracer, local: localTracer })"
+        "ApolloOpencensus needs a tracer, please provide it to the constructor. e.g. new ApolloOpencensus({ tracer })"
       );
     }
 
-    if (!local) {
-      throw new Error(
-        "ApolloOpentracing needs a local tracer, please provide it to the constructor. e.g. new ApolloOpentracing({ server: serverTracer, local: localTracer })"
-      );
-    }
-
-    this.serverTracer = server;
-    this.localTracer = local;
+    this.tracer = tracer;
     this.requestSpan = null;
     this.shouldTraceRequest = shouldTraceRequest || alwaysTrue;
     this.shouldTraceFieldResolver = shouldTraceFieldResolver || alwaysTrue;
@@ -116,7 +114,7 @@ export default class OpentracingExtension<TContext extends SpanContext>
   mapToObj(inputMap: Map<string, any>) {
     let obj: { [key: string]: string } = {};
 
-    inputMap.forEach(function(value, key) {
+    inputMap.forEach(function (value, key) {
       obj[key] = value;
     });
 
@@ -128,29 +126,42 @@ export default class OpentracingExtension<TContext extends SpanContext>
       return;
     }
 
-    let headers;
-    let tmpHeaders =
-      infos.request && ((infos.request.headers as unknown) as Map<string, any>);
-    if (tmpHeaders && typeof tmpHeaders.get === "function") {
-      headers = this.mapToObj(tmpHeaders);
-    } else {
-      headers = tmpHeaders;
-    }
+    const getter: HeaderGetter = {
+      getHeader(name: string) {
+        // Fix types
+        return infos.request.headers.get(name) ?? undefined;
+      },
+    };
 
-    const externalSpan =
-      infos.request && infos.request.headers
-        ? this.serverTracer.extract(FORMAT_HTTP_HEADERS, headers)
+    const traceOptions: TraceOptions = {
+      name: "request",
+      kind: SpanKind.SERVER,
+    };
+
+    const spanContext =
+      infos.request && infos.request?.headers
+        ? this.tracer.propagation.extract(getter)
         : undefined;
 
-    const rootSpan = this.serverTracer.startSpan("request", {
-      childOf: externalSpan ? externalSpan : undefined
+    if (spanContext) {
+      traceOptions.spanContext = spanContext;
+    }
+
+    // const rootSpan = this.tracer.startChildSpan({
+    //   name: "request",
+    //   childOf: externalSpan ? externalSpan : undefined,
+    // });
+
+    // TODO: is this correct?
+    const rootSpan = this.tracer.startRootSpan(traceOptions, (rootSpan) => {
+      return rootSpan;
     });
 
     this.onRequestResolve(rootSpan, infos);
     this.requestSpan = rootSpan;
 
     return () => {
-      rootSpan.finish();
+      rootSpan.end();
     };
   }
 
@@ -180,8 +191,30 @@ export default class OpentracingExtension<TContext extends SpanContext>
         ? context.getSpanByPath(info.path.prev)
         : this.requestSpan;
 
-    const span = this.localTracer.startSpan(name, {
-      childOf: parentSpan || undefined
+    // Falls prey to closed parent spans - https://github.com/open-telemetry/opentelemetry-node/issues/4
+    // https://github.com/census-instrumentation/opencensus-node/issues/791
+    // const span = this.tracer.startChildSpan({
+    //   name,
+    //   childOf: parentSpan || undefined,
+    // });
+
+    const traceOptions: TraceOptions = {
+      name,
+      kind: SpanKind.SERVER,
+      spanContext: parentSpan?.spanContext,
+    };
+
+    // TODO: check parent trace state?
+    const span = this.tracer.startRootSpan(traceOptions, (span) => {
+      if (parentSpan) {
+        span.addLink(
+          parentSpan.traceId,
+          parentSpan.id,
+          LinkType.CHILD_LINKED_SPAN
+        );
+      }
+
+      return span;
     });
 
     context.addSpan(span, info);
@@ -196,7 +229,7 @@ export default class OpentracingExtension<TContext extends SpanContext>
       if (this.onFieldResolveFinish) {
         this.onFieldResolveFinish(error, result, span);
       }
-      span.finish();
+      span.end();
     };
   }
 }

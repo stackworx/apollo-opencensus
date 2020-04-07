@@ -1,4 +1,4 @@
-import { Span } from "opentracing";
+import { Span } from "@opencensus/core";
 import { GraphQLResolveInfo, ResponsePath } from "graphql";
 
 function isArrayPath(path: ResponsePath) {
@@ -37,12 +37,19 @@ export function addContextHelpers(obj: any): SpanContext {
     return obj;
   }
 
+  // TODO: symbol?
+  // Object.defineProperty(obj, "_spans", {
+  //   value: new Map<string, Span>(),
+  //   enumerable: false,
+  //   writable: false,
+  // });
+
   obj._spans = new Map<string, Span>();
-  obj.getSpanByPath = function(path: ResponsePath): Span | undefined {
+  obj.getSpanByPath = function (path: ResponsePath): Span | undefined {
     return this._spans.get(buildPath(isArrayPath(path) ? path.prev : path));
   };
 
-  obj.addSpan = function(span: Span, info: GraphQLResolveInfo): void {
+  obj.addSpan = function (span: Span, info: GraphQLResolveInfo): void {
     this._spans.set(buildPath(info.path), span);
   };
 
