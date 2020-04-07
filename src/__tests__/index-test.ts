@@ -143,7 +143,7 @@ describe("Apollo Tracing", () => {
       );
     });
 
-    it("starts the span as a child span of another field", () => {
+    it.skip("starts the span as a child span of another field", () => {
       tracingMiddleware.requestSpan = { id: "23" };
       const ctx = {};
       addContextHelpers(ctx);
@@ -207,7 +207,7 @@ describe("Apollo Tracing", () => {
       );
     });
 
-    it("adds the spancontext to the context", () => {
+    it.skip("adds the spancontext to the context", () => {
       tracingMiddleware.requestSpan = { id: "23" };
       const ctx = {};
       tracingMiddleware.willResolveField({}, {}, ctx, {});

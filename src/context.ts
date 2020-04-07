@@ -31,27 +31,35 @@ function isSpanContext(obj: any): obj is SpanContext {
   );
 }
 
+const SPANS = Symbol("spans");
+
 // TODO: think about using symbols to hide these
 export function addContextHelpers(obj: any): SpanContext {
   if (isSpanContext(obj)) {
     return obj;
   }
 
-  // TODO: symbol?
-  // Object.defineProperty(obj, "_spans", {
-  //   value: new Map<string, Span>(),
-  //   enumerable: false,
-  //   writable: false,
-  // });
+  Object.defineProperty(obj, SPANS, {
+    value: new Map<string, Span>(),
+    enumerable: false,
+    writable: false,
+  });
 
-  obj._spans = new Map<string, Span>();
-  obj.getSpanByPath = function (path: ResponsePath): Span | undefined {
-    return this._spans.get(buildPath(isArrayPath(path) ? path.prev : path));
-  };
+  Object.defineProperty(obj, "getSpanByPath", {
+    value: function (path: ResponsePath): Span | undefined {
+      return obj[SPANS].get(buildPath(isArrayPath(path) ? path.prev : path));
+    },
+    enumerable: false,
+    writable: false,
+  });
 
-  obj.addSpan = function (span: Span, info: GraphQLResolveInfo): void {
-    this._spans.set(buildPath(info.path), span);
-  };
+  Object.defineProperty(obj, "addSpan", {
+    value: function (span: Span, info: GraphQLResolveInfo): void {
+      obj[SPANS].set(buildPath(info.path), span);
+    },
+    enumerable: true,
+    writable: false,
+  });
 
   return obj;
 }
