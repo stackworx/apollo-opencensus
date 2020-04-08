@@ -1,31 +1,46 @@
 import express from "express";
 import request from "supertest";
-import { Exporter, Span, LinkType } from "@opencensus/core";
-import { TracingBase } from "@opencensus/nodejs-base";
-import { TraceContextFormat } from "@opencensus/propagation-tracecontext";
-import { JaegerTraceExporter } from "@opencensus/exporter-jaeger";
+import { Tracer, Context, defaultSetter } from "@opentelemetry/api";
+import {
+  ReadableSpan,
+  BasicTracerProvider,
+  BatchSpanProcessor,
+  SpanProcessor,
+  Span,
+} from "@opentelemetry/tracing";
+import { setExtractedSpanContext } from "@opentelemetry/core";
+import { JaegerExporter } from "@opentelemetry/exporter-jaeger";
+import { JaegerHttpTracePropagator } from "@opentelemetry/propagator-jaeger";
 import { ApolloServer } from "apollo-server-express";
 
 import ApolloOpencensus from "../";
 import spanSerializer, { SpanTree } from "../test/span-serializer";
 
-const { JAEGER_EXPORTER = false } = process.env;
+const propagator = new JaegerHttpTracePropagator();
 
-const traceContext = new TraceContextFormat();
+const basicTracerProvider = new BasicTracerProvider();
+basicTracerProvider.register({
+  // Use Jaeger propagator
+  propagator,
+});
+
+const { JAEGER_EXPORTER = false } = process.env;
 
 expect.addSnapshotSerializer(spanSerializer);
 
-class TestExporter implements Exporter {
-  public spans: Span[] = [];
-  public spansById: Map<string, Span> = new Map();
+class TestExporter implements SpanProcessor {
+  public spans: ReadableSpan[] = [];
 
-  async publish(_spans: Span[]): Promise<void> {}
-
-  onStartSpan(span: Span): void {
-    this.spans.push(span);
-    this.spansById.set(span.id, span);
+  onStart(span: Span) {
+    const rs = span.toReadableSpan();
+    this.spans.push(rs);
   }
-  onEndSpan(_span: Span): void {}
+
+  onEnd(_span: Span) {}
+
+  forceFlush() {}
+
+  shutdown() {}
 
   buildSpanTree() {
     const spans = this.spans;
@@ -36,27 +51,18 @@ class TestExporter implements Exporter {
 
     const spansByParentId = spans.reduce((acc, span) => {
       // Check for root
-      if (span.links.length > 0) {
-        const parentLink = span.links.find(
-          // (link) => link.type == LinkType.PARENT_LINKED_SPAN
-          (link) => link.type == LinkType.CHILD_LINKED_SPAN
-        );
-
-        if (parentLink) {
-          const parentSpanId = parentLink.spanId;
-
-          if (acc.has(parentSpanId)) {
-            acc.get(parentSpanId).push(span);
-          } else {
-            acc.set(parentSpanId, [span]);
-          }
+      if (span.parentSpanId) {
+        if (acc.has(span.parentSpanId)) {
+          acc.get(span.parentSpanId).push(span);
+        } else {
+          acc.set(span.parentSpanId, [span]);
         }
       } else {
         rootSpan = span;
       }
 
       return acc;
-    }, new Map<string, Span[]>());
+    }, new Map<string, ReadableSpan[]>());
 
     expect(rootSpan).toBeDefined();
 
@@ -71,12 +77,23 @@ class TestExporter implements Exporter {
   }
 }
 
-const buildTree = (tree: SpanTree, spansByParentId: Map<string, Span[]>) => {
+if (JAEGER_EXPORTER) {
+  // TODO: this does not catch all spans
+  afterAll(() => {
+    basicTracerProvider.getActiveSpanProcessor().forceFlush();
+    basicTracerProvider.getActiveSpanProcessor().shutdown();
+  });
+}
+
+const buildTree = (
+  tree: SpanTree,
+  spansByParentId: Map<string, ReadableSpan[]>
+) => {
   const { parent } = tree;
 
-  if (spansByParentId.has(parent.id)) {
-    const spans = spansByParentId.get(parent.id);
-    spansByParentId.delete(parent.id);
+  if (spansByParentId.has(parent.spanContext.spanId)) {
+    const spans = spansByParentId.get(parent.spanContext.spanId);
+    spansByParentId.delete(parent.spanContext.spanId);
 
     // TODO: do we need to sort?
     for (const span of spans) {
@@ -92,29 +109,30 @@ const buildTree = (tree: SpanTree, spansByParentId: Map<string, Span[]>) => {
 };
 
 function createTracer(): {
-  tracer: TracingBase;
+  tracer: Tracer;
   exporter: TestExporter;
 } {
   const exporter = new TestExporter();
-  const base = new TracingBase();
-  base.registerExporter(exporter);
-  // Sample all requests
-  const tracer = base.start({ propagation: traceContext, samplingRate: 1 });
+
+  basicTracerProvider.addSpanProcessor(exporter);
 
   if (JAEGER_EXPORTER) {
-    base.registerExporter(
-      new JaegerTraceExporter({
-        serviceName: "apollo-opentracing",
-        tags: [], // optional
-        host: "localhost", // optional
-        port: 6832, // optional
-        maxPacketSize: 65000, // optional
-      })
+    basicTracerProvider.addSpanProcessor(
+      new BatchSpanProcessor(
+        new JaegerExporter({
+          serviceName: "apollo-opentracing",
+          tags: [], // optional
+          host: "localhost", // optional
+          port: 6832, // optional
+          maxPacketSize: 65000, // optional
+        })
+      )
     );
   }
 
-  // @ts-ignore
-  return { tracer: tracer.tracer, exporter };
+  const tracer = basicTracerProvider.getTracer("default");
+
+  return { tracer, exporter };
 }
 
 function createApp({ tracer, ...params }) {
@@ -181,10 +199,11 @@ function createApp({ tracer, ...params }) {
 }
 
 describe("integration with apollo-server", () => {
-  it.only("closes all spans", async () => {
+  it("closes all spans", async () => {
     // const tracer = new MockTracer();
     const { tracer, exporter } = createTracer();
     const app = createApp({ tracer });
+
     await request(app)
       .post("/graphql")
       .set("Accept", "application/json")
@@ -197,9 +216,11 @@ describe("integration with apollo-server", () => {
       })
       .expect(200);
 
+    debugger;
+    basicTracerProvider.getActiveSpanProcessor().forceFlush();
+
     expect(exporter.spans.length).toBe(3);
     expect(exporter.spans.filter((span) => span.ended).length).toBe(3);
-    tracer.stop();
   });
 
   it("correct span nesting", async () => {
@@ -221,7 +242,6 @@ describe("integration with apollo-server", () => {
 
     const tree = exporter.buildSpanTree();
     expect(tree).toMatchSnapshot();
-    tracer.stop();
   });
 
   it("does not start a field resolver span if the parent field resolver was not traced", async () => {
@@ -313,6 +333,40 @@ describe("integration with apollo-server", () => {
         query {
         a {
           ...F
+        }
+      }`,
+      })
+      .expect(200);
+
+    const tree = exporter.buildSpanTree();
+    expect(tree).toMatchSnapshot();
+  });
+
+  it.only("injected parent span", async () => {
+    // const tracer = new MockTracer();
+    const { tracer, exporter } = createTracer();
+    const app = createApp({ tracer });
+
+    const carrier: { [key: string]: string } = {};
+
+    const span = tracer.startSpan("remote");
+
+    const context = setExtractedSpanContext(
+      Context.ROOT_CONTEXT,
+      span.context()
+    );
+
+    propagator.inject(context, carrier, defaultSetter);
+
+    await request(app)
+      .post("/graphql")
+      .set("Accept", "application/json")
+      .set("uber-trace-id", carrier["uber-trace-id"])
+      .send({
+        query: `query {
+        a {
+          one
+          two
         }
       }`,
       })

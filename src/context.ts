@@ -1,4 +1,4 @@
-import { Span } from "@opencensus/core";
+import { Span } from "@opentelemetry/api";
 import { GraphQLResolveInfo, ResponsePath } from "graphql";
 
 function isArrayPath(path: ResponsePath) {

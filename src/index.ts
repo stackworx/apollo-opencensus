@@ -4,13 +4,14 @@ import { DocumentNode, GraphQLResolveInfo } from "graphql";
 import { GraphQLExtension } from "graphql-extensions";
 
 import {
+  Context,
   Span,
   Tracer,
-  HeaderGetter,
-  TraceOptions,
+  SpanOptions,
   SpanKind,
-  LinkType,
-} from "@opencensus/core";
+  propagation,
+} from "@opentelemetry/api";
+import { getExtractedSpanContext } from "@opentelemetry/core";
 import { addContextHelpers, SpanContext } from "./context";
 
 export { SpanContext, addContextHelpers };
@@ -126,36 +127,27 @@ export default class OpencensusExtension<TContext extends SpanContext>
       return;
     }
 
-    const getter: HeaderGetter = {
-      getHeader(name: string) {
-        // Fix types
-        return infos.request.headers.get(name) ?? undefined;
-      },
+    const getter = (
+      request: RequestStart<TContext>["request"],
+      key: string
+    ) => {
+      return request?.headers.get(key) ?? undefined;
     };
 
-    const traceOptions: TraceOptions = {
-      name: "request",
+    const parentContext = propagation.extract(
+      infos.request,
+      getter,
+      Context.ROOT_CONTEXT
+    );
+
+    const spanOptions: SpanOptions = {
       kind: SpanKind.SERVER,
+      parent: parentContext
+        ? getExtractedSpanContext(parentContext)
+        : undefined,
     };
 
-    const spanContext =
-      infos.request && infos.request?.headers
-        ? this.tracer.propagation.extract(getter)
-        : undefined;
-
-    if (spanContext) {
-      traceOptions.spanContext = spanContext;
-    }
-
-    // const rootSpan = this.tracer.startChildSpan({
-    //   name: "request",
-    //   childOf: externalSpan ? externalSpan : undefined,
-    // });
-
-    // TODO: is this correct?
-    const rootSpan = this.tracer.startRootSpan(traceOptions, (rootSpan) => {
-      return rootSpan;
-    });
+    const rootSpan = this.tracer.startSpan("request", spanOptions);
 
     this.onRequestResolve(rootSpan, infos);
     this.requestSpan = rootSpan;
@@ -191,31 +183,12 @@ export default class OpencensusExtension<TContext extends SpanContext>
         ? context.getSpanByPath(info.path.prev)
         : this.requestSpan;
 
-    // Falls prey to closed parent spans - https://github.com/open-telemetry/opentelemetry-node/issues/4
-    // https://github.com/census-instrumentation/opencensus-node/issues/791
-    // const span = this.tracer.startChildSpan({
-    //   name,
-    //   childOf: parentSpan || undefined,
-    // });
-
-    const traceOptions: TraceOptions = {
-      name,
+    const spanOptions: SpanOptions = {
       kind: SpanKind.SERVER,
-      spanContext: parentSpan?.spanContext,
+      parent: parentSpan,
     };
 
-    // TODO: check parent trace state?
-    const span = this.tracer.startRootSpan(traceOptions, (span) => {
-      if (parentSpan) {
-        span.addLink(
-          parentSpan.traceId,
-          parentSpan.id,
-          LinkType.CHILD_LINKED_SPAN
-        );
-      }
-
-      return span;
-    });
+    const span = this.tracer.startSpan(name, spanOptions);
 
     context.addSpan(span, info);
     // expose to field

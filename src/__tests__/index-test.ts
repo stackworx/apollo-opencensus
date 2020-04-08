@@ -1,6 +1,6 @@
 import ApolloOpencensus from "..";
 import { addContextHelpers } from "../context";
-import { SpanKind } from "@opencensus/core";
+import { SpanKind } from "@opentelemetry/api";
 
 describe("Apollo Tracing", () => {
   let tracer, tracingMiddleware;
@@ -13,8 +13,7 @@ describe("Apollo Tracing", () => {
 
     tracer = {
       span,
-      startChildSpan: jest.fn(() => span),
-      startRootSpan: jest.fn(() => span),
+      startSpan: jest.fn(() => span),
       inject: jest.fn(),
       extract: jest.fn(),
     };
@@ -41,7 +40,7 @@ describe("Apollo Tracing", () => {
   describe("request spans", () => {
     it("starts and finishes a request spans if there are no errors", () => {
       const cb = tracingMiddleware.requestDidStart({ queryString: "query {}" });
-      expect(tracer.startRootSpan).toHaveBeenCalled();
+      expect(tracer.startSpan).toHaveBeenCalled();
       // expect(tracer.startSpan).not.toHaveBeenCalled();
 
       cb();
@@ -50,7 +49,7 @@ describe("Apollo Tracing", () => {
 
     it("starts and finishes a request spans if there are errors", () => {
       const cb = tracingMiddleware.requestDidStart({ queryString: "query {}" });
-      expect(tracer.startRootSpan).toHaveBeenCalled();
+      expect(tracer.startSpan).toHaveBeenCalled();
       // expect(tracer.startSpan).not.toHaveBeenCalled();
 
       cb(new Error("ups"));
@@ -78,7 +77,7 @@ describe("Apollo Tracing", () => {
       });
 
       tracingMiddleware.requestDidStart({ queryString: "query {}" });
-      expect(tracer.startRootSpan).not.toHaveBeenCalled();
+      expect(tracer.startSpan).not.toHaveBeenCalled();
     });
 
     // it("picks up the tracing headers as parent span", () => {
@@ -106,20 +105,21 @@ describe("Apollo Tracing", () => {
     it("starts a new local span for the field", () => {
       tracingMiddleware.requestSpan = { id: "23" };
       tracingMiddleware.willResolveField({}, {}, {}, {});
-      // expect(tracer.startRootSpan).not.toHaveBeenCalled();
-      expect(tracer.startRootSpan).toHaveBeenCalled();
+      // expect(tracer.startSpan).not.toHaveBeenCalled();
+      expect(tracer.startSpan).toHaveBeenCalled();
     });
 
     it("uses the 'fieldname' as the span name if no fieldname can be found", () => {
       tracingMiddleware.requestSpan = { id: "23" };
       tracingMiddleware.willResolveField({}, {}, {}, {});
-      expect(tracer.startRootSpan).toHaveBeenCalledWith(
+      expect(tracer.startSpan).toHaveBeenCalledWith(
+        "field",
         expect.objectContaining({
           kind: SpanKind.SERVER,
-          name: "field",
-          spanContext: undefined,
-        }),
-        expect.anything()
+          parent: expect.objectContaining({
+            id: expect.any(String),
+          }),
+        })
       );
     });
 
@@ -133,13 +133,14 @@ describe("Apollo Tracing", () => {
           fieldName: "myField",
         }
       );
-      expect(tracer.startRootSpan).toHaveBeenCalledWith(
+      expect(tracer.startSpan).toHaveBeenCalledWith(
+        "myField",
         expect.objectContaining({
           kind: SpanKind.SERVER,
-          name: "myField",
-          spanContext: undefined,
-        }),
-        expect.anything()
+          parent: expect.objectContaining({
+            id: expect.any(String),
+          }),
+        })
       );
     });
 
@@ -156,7 +157,7 @@ describe("Apollo Tracing", () => {
       });
 
       // TODO: assert add link
-      expect(tracer.startRootSpan).toHaveBeenCalledWith(
+      expect(tracer.startSpan).toHaveBeenCalledWith(
         expect.objectContaining({
           kind: SpanKind.SERVER,
           name: "field",
@@ -169,19 +170,20 @@ describe("Apollo Tracing", () => {
     it("starts the span as a child span of the request", () => {
       tracingMiddleware.requestSpan = { id: "23" };
       tracingMiddleware.willResolveField({}, {}, {}, {});
-      expect(tracer.startRootSpan).toHaveBeenCalledWith(
+      expect(tracer.startSpan).toHaveBeenCalledWith(
+        "field",
         expect.objectContaining({
           kind: SpanKind.SERVER,
-          name: "field",
-          spanContext: undefined,
-        }),
-        expect.anything()
+          parent: expect.objectContaining({
+            id: expect.any(String),
+          }),
+        })
       );
     });
 
     it("does not start a span if there is no request span", () => {
       tracingMiddleware.willResolveField({}, {}, {}, {});
-      expect(tracer.startRootSpan).not.toHaveBeenCalled();
+      expect(tracer.startSpan).not.toHaveBeenCalled();
     });
 
     it("does not start a span if the predicate returns false", () => {
@@ -198,7 +200,7 @@ describe("Apollo Tracing", () => {
         { d: true }
       );
 
-      expect(tracer.startRootSpan).not.toHaveBeenCalled();
+      expect(tracer.startSpan).not.toHaveBeenCalled();
       expect(shouldTraceFieldResolver).toHaveBeenCalledWith(
         { a: true },
         { b: true },

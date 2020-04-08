@@ -85,3 +85,22 @@ request
 
 
 `;
+
+exports[`integration with apollo-server injected parent span 1`] = `
+remote
+   finished: false
+
++-- request
+      finished: true
+
+   +-- a
+         finished: true
+
+      +-- one
+            finished: true
+
+      +-- two
+            finished: true
+
+
+`;
